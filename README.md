@@ -28,14 +28,16 @@ Two ways in, both driving one shared FluidSynth instance:
   norns. The package also brings in a small GM soundfont (TimGM6mb), so it
   plays right away (see below).
 
-  Newer Debian packages include a `fluidsynth` systemd user service. If it
-  is running, it can take the audio device away from JACK. Check it, and
-  turn it off if it's active (the mod starts its own fluidsynth):
+  The package also installs a `fluidsynth` systemd user service and
+  enables it. It may show as inactive right after install, but it can start
+  on your next login or reboot. It would then run a second fluidsynth
+  alongside the mod's own. Disable it right after installing:
 
   ```
-  systemctl --user status fluidsynth
   systemctl --user disable --now fluidsynth
   ```
+
+  `systemctl --user status fluidsynth` should then say `disabled`.
 
 ## Install
 
