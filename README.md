@@ -20,10 +20,22 @@ Two ways in, both driving one shared FluidSynth instance:
 - `fluidsynth` built with JACK support. On norns:
 
   ```
-  sudo apt install fluidsynth
+  sudo apt update
+  sudo apt install --no-install-recommends fluidsynth
   ```
 
-- a General MIDI soundfont (see below)
+  `--no-install-recommends` skips `qsynth`, a Qt GUI that is of no use on
+  norns. The package also brings in a small GM soundfont (TimGM6mb), so it
+  plays right away (see below).
+
+  Newer Debian packages include a `fluidsynth` systemd user service. If it
+  is running, it can take the audio device away from JACK. Check it, and
+  turn it off if it's active (the mod starts its own fluidsynth):
+
+  ```
+  systemctl --user status fluidsynth
+  systemctl --user disable --now fluidsynth
+  ```
 
 ## Install
 
@@ -42,11 +54,23 @@ Put soundfonts in the mod's own folder:
 ```
 
 The folder is created when the mod loads. Choose the active soundfont in the
-mod menu. Good GM choices:
+mod menu.
+
+While that folder is empty, the mod uses the system soundfonts in
+`/usr/share/sounds/sf2/` and `/usr/share/sounds/sf3/` (Debian) or
+`/usr/share/soundfonts/` (Arch). On norns that means the TimGM6mb soundfont
+that came with fluidsynth: only ~6 MB, and it sounds thin. Once you add a
+soundfont of your own, only the mod's folder is used. Symlink a system
+soundfont there if you want to keep it in the list:
+
+```
+ln -s /usr/share/sounds/sf2/TimGM6mb.sf2 ~/dust/data/nb_fluid/soundfonts/
+```
+
+Better-sounding GM choices:
 
 - **FluidR3_GM.sf2**: FluidSynth's usual default (~140 MB). On Debian it is
-  in the `fluid-soundfont-gm` package, installed to
-  `/usr/share/sounds/sf2/`; symlink or copy it into the folder above.
+  in the `fluid-soundfont-gm` package.
 - **GeneralUser GS**: much smaller (~30 MB), a good fit for norns.
 
 Samples load on demand (`synth.dynamic-sample-loading`), so memory use

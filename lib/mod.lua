@@ -16,6 +16,13 @@ local PREFS_FILE = DATA_DIR .. "prefs.data"
 local LOG_FILE = "/tmp/nb_fluid.log"
 local JACK_ID = "nb_fluid"
 local SOUNDFONT_DIR = DATA_DIR .. "soundfonts/"
+-- used only while SOUNDFONT_DIR has no soundfonts, so a fresh
+-- `apt install fluidsynth` (which pulls in a GM font) plays right away
+local SYSTEM_SOUNDFONT_DIRS = {
+  "/usr/share/sounds/sf2/",
+  "/usr/share/sounds/sf3/",
+  "/usr/share/soundfonts/",
+}
 -- the engine inputs; SuperCollider uses the same pair
 local ROUTES = {
   { JACK_ID .. ":left", "crone:input_5" },
@@ -60,11 +67,22 @@ local function write_prefs()
   tab.save(prefs, PREFS_FILE)
 end
 
+local function scan_soundfonts(dir, found)
+  if not util.file_exists(dir) then return end
+  for _, name in ipairs(util.scandir(dir)) do
+    -- skip Debian's default-GM.* alternatives links; they duplicate a real file
+    if name:lower():match("%.sf[23]$") and not name:match("^default%-") then
+      table.insert(found, dir .. name)
+    end
+  end
+end
+
 local function find_soundfonts()
   local found = {}
-  for _, name in ipairs(util.scandir(SOUNDFONT_DIR)) do
-    if name:lower():match("%.sf[23]$") then
-      table.insert(found, SOUNDFONT_DIR .. name)
+  scan_soundfonts(SOUNDFONT_DIR, found)
+  if #found == 0 then
+    for _, dir in ipairs(SYSTEM_SOUNDFONT_DIRS) do
+      scan_soundfonts(dir, found)
     end
   end
   return found
