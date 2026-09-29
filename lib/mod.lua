@@ -186,16 +186,30 @@ local function p(i, name)
   return "nb_fluid_" .. name .. "_" .. i
 end
 
+-- voices a script is playing. only these push their params to fluidsynth,
+-- so the other channels stay free for the MIDI device.
+local in_use = {}
+
 local function has_params(i)
   return params and params.lookup[p(i, "kind")] ~= nil
+end
+
+local function owns(i)
+  return in_use[i] and has_params(i)
 end
 
 local function cc(ch, num, val)
   send(string.format("cc %d %d %d", ch, num, util.clamp(math.floor(val), 0, 127)))
 end
 
+local function voice_cc(i, num, val)
+  if owns(i) then
+    cc(i - 1, num, val)
+  end
+end
+
 local function apply_program(i)
-  if not has_params(i) then return end
+  if not owns(i) then return end
   if params:get(p(i, "kind")) == 2 then
     local kit = gm.drum_kits[params:get(p(i, "kit"))]
     send(string.format("select %d %d 128 %d", i - 1, SFONT_ID, kit.prog))
@@ -206,18 +220,17 @@ local function apply_program(i)
 end
 
 local function apply_voice(i)
-  if not has_params(i) then return end
-  local ch = i - 1
+  if not owns(i) then return end
   apply_program(i)
-  cc(ch, 7, params:get(p(i, "volume")))
-  cc(ch, 10, (params:get(p(i, "pan")) + 1) * 64)
-  cc(ch, 91, params:get(p(i, "reverb")))
-  cc(ch, 93, params:get(p(i, "chorus")))
-  send(string.format("pitch_bend_range %d %d", ch, params:get(p(i, "bend_range"))))
+  voice_cc(i, 7, params:get(p(i, "volume")))
+  voice_cc(i, 10, (params:get(p(i, "pan")) + 1) * 64)
+  voice_cc(i, 91, params:get(p(i, "reverb")))
+  voice_cc(i, 93, params:get(p(i, "chorus")))
+  send(string.format("pitch_bend_range %d %d", i - 1, params:get(p(i, "bend_range"))))
 end
 
 apply_all_voices = function()
-  for i = 1, MAX_VOICES do
+  for i in pairs(in_use) do
     apply_voice(i)
   end
 end
@@ -237,7 +250,6 @@ local function update_visibility(i)
 end
 
 local function add_fluid_params(i)
-  local ch = i - 1
   params:add_group(p(i, "group"), "fluid " .. i, 9)
   params:add_option(p(i, "kind"), "kind", { "melodic", "drums" }, 1)
   params:set_action(p(i, "kind"), function(kind)
@@ -252,16 +264,18 @@ local function add_fluid_params(i)
   params:add_option(p(i, "kit"), "kit", gm.drum_kit_options, 1)
   params:set_action(p(i, "kit"), function() apply_program(i) end)
   params:add_number(p(i, "volume"), "volume", 0, 127, 100)
-  params:set_action(p(i, "volume"), function(v) cc(ch, 7, v) end)
+  params:set_action(p(i, "volume"), function(v) voice_cc(i, 7, v) end)
   params:add_control(p(i, "pan"), "pan", controlspec.new(-1, 1, "lin", 0.01, 0))
-  params:set_action(p(i, "pan"), function(v) cc(ch, 10, (v + 1) * 64) end)
+  params:set_action(p(i, "pan"), function(v) voice_cc(i, 10, (v + 1) * 64) end)
   params:add_number(p(i, "reverb"), "reverb", 0, 127, 40)
-  params:set_action(p(i, "reverb"), function(v) cc(ch, 91, v) end)
+  params:set_action(p(i, "reverb"), function(v) voice_cc(i, 91, v) end)
   params:add_number(p(i, "chorus"), "chorus", 0, 127, 0)
-  params:set_action(p(i, "chorus"), function(v) cc(ch, 93, v) end)
+  params:set_action(p(i, "chorus"), function(v) voice_cc(i, 93, v) end)
   params:add_number(p(i, "bend_range"), "bend range", 1, 24, 2)
   params:set_action(p(i, "bend_range"), function(v)
-    send(string.format("pitch_bend_range %d %d", ch, v))
+    if owns(i) then
+      send(string.format("pitch_bend_range %d %d", i - 1, v))
+    end
   end)
 
   update_visibility(i)
@@ -282,6 +296,7 @@ local function add_fluid_player(i)
       update_visibility(i)
       _menu.rebuild_params()
     end
+    in_use[i] = true
     if not fluid.pipe then
       start()
     else
@@ -290,6 +305,7 @@ local function add_fluid_player(i)
   end
 
   function player:inactive()
+    in_use[i] = nil
     if self.name ~= nil then
       params:hide(p(i, "group"))
       _menu.rebuild_params()
@@ -310,6 +326,10 @@ local function add_fluid_player(i)
 
   function player:note_on(note, vel, properties)
     if not fluid.pipe and not start() then return end
+    if not in_use[i] then
+      in_use[i] = true
+      apply_voice(i)
+    end
     local key = math.floor(note + 0.5) % 128
     local velocity = util.clamp(math.floor(vel * 127 + 0.5), 1, 127)
     send(string.format("noteon %d %d %d", ch, key, velocity))
@@ -341,12 +361,93 @@ local function add_fluid_player(i)
 end
 
 ------------------------------------------------------------------------
+-- virtual MIDI device
+--
+-- "fluidsynth" shows up in SYSTEM > DEVICES > MIDI like a plugged-in
+-- synth, so scripts with MIDI out (e.g. MIDI file players) can play all
+-- 16 channels General MIDI style: programs, CCs, bend, drums on 10.
+
+local MIDI_DEVICE_ID = "nb_fluid"
+
+local function is_reset_sysex(data, first, last)
+  local msg = table.concat(data, " ", first, last)
+  return msg:match("^240 126 %d+ 9 1 247$") -- GM system on
+    or msg:match("^240 65 %d+ 66 18 64 0 127 0 65 247$") -- GS reset
+    or msg:match("^240 67 %d+ 76 0 0 126 0 247$") -- XG system on
+end
+
+local function midi_to_fluid(data)
+  local i = 1
+  while i <= #data do
+    local status = data[i]
+    if status == 0xF0 then
+      local last = i
+      while last < #data and data[last] ~= 0xF7 do
+        last = last + 1
+      end
+      if is_reset_sysex(data, i, last) then
+        send("reset")
+        apply_all_voices()
+      end
+      i = last + 1
+    elseif status >= 0xF0 then
+      -- system common / realtime (clock, start, stop...): nothing to play
+      i = i + ((status == 0xF2) and 3 or (status == 0xF1 or status == 0xF3) and 2 or 1)
+    elseif status >= 0x80 then
+      local kind, ch = status & 0xF0, status & 0x0F
+      local a, b = data[i + 1] or 0, data[i + 2] or 0
+      if kind == 0x90 and b > 0 then
+        send(string.format("noteon %d %d %d", ch, a, b))
+      elseif kind == 0x80 or kind == 0x90 then
+        send(string.format("noteoff %d %d", ch, a))
+      elseif kind == 0xB0 then
+        send(string.format("cc %d %d %d", ch, a, b))
+      elseif kind == 0xC0 then
+        send(string.format("prog %d %d", ch, a))
+      elseif kind == 0xE0 then
+        send(string.format("pitch_bend %d %d", ch, (b << 7) | a))
+      end
+      -- (fluidsynth's shell has no aftertouch commands)
+      i = i + ((kind == 0xC0 or kind == 0xD0) and 2 or 3)
+    else
+      i = i + 1
+    end
+  end
+end
+
+local function add_midi_device()
+  if midi.devices[MIDI_DEVICE_ID] then return end
+  local d = midi.new(MIDI_DEVICE_ID, "fluidsynth", nil)
+  function d:send(data)
+    if data.type then
+      data = midi.to_data(data)
+    end
+    -- MIDI clock etc. shouldn't wake fluidsynth up
+    if data[1] == nil or data[1] >= 0xF8 then return end
+    if not fluid.pipe and not start() then return end
+    midi_to_fluid(data)
+  end
+  -- there's no C-side device behind this one
+  function d:clock_receive() end
+  midi.devices[MIDI_DEVICE_ID] = d
+  midi.update_devices()
+  if midi.add then midi.add(d) end
+end
+
+------------------------------------------------------------------------
 -- hooks
 
 util.make_dir(SOUNDFONT_DIR)
 
+mod.hook.register("system_post_startup", "nb_fluid midi device", function()
+  add_midi_device()
+end)
+
 mod.hook.register("script_pre_init", "nb_fluid pre init", function()
   read_prefs()
+  for i in pairs(in_use) do
+    in_use[i] = nil
+  end
   for i = 1, prefs.voices do
     add_fluid_player(i)
   end

@@ -4,9 +4,14 @@ An [nb](https://llllllll.co/t/n-b-et-al-v0-1/60374) voice mod for norns that
 plays [FluidSynth](https://www.fluidsynth.org/): General MIDI sounds on norns
 from any SoundFont (`.sf2` / `.sf3`).
 
-Each voice `fluid 1` … `fluid N` is one MIDI channel of a single shared
-FluidSynth instance. Pick any of the 128 GM programs, or switch a voice to
-drums and choose a GM/GS drum kit.
+Two ways in, both driving one shared FluidSynth instance:
+
+- **nb voices** `fluid 1` … `fluid N`: each is one MIDI channel. Pick any of
+  the 128 GM programs, or switch a voice to drums and choose a drum kit.
+- **a virtual MIDI device** called `fluidsynth`: a 16-channel General MIDI
+  synth for any script with MIDI out, e.g. a MIDI file player. The song
+  picks its own instruments with program changes, and drums are on
+  channel 10.
 
 ## Requirements
 
@@ -57,6 +62,25 @@ follows the programs you actually select.
   load)
 - **gain**: FluidSynth master gain, applied immediately
 
+## MIDI device
+
+In **SYSTEM > DEVICES > MIDI**, assign `fluidsynth` to a port. norns
+remembers the assignment like it would for a hardware synth. Then point a
+script's MIDI output at that port. Handled messages:
+
+- note on/off
+- program change (with CC 0/32 bank select)
+- all CCs (volume, pan, expression, sustain, reverb/chorus sends,
+  all-notes-off, …)
+- pitch bend
+- GM / GS / XG reset SysEx
+
+Aftertouch is ignored.
+
+MIDI channel N and nb voice `fluid N` are the same FluidSynth channel. An nb
+voice only takes over its channel while a script is using it. So for a
+multi-channel song, send it through the MIDI device rather than an nb voice.
+
 ## Voice params
 
 Once a script selects a `fluid N` voice, its param group shows up:
@@ -83,7 +107,8 @@ GeneralUser GS both do.
 
 ## How it works
 
-The mod starts `fluidsynth` the first time a `fluid` voice is selected, and
+The mod starts `fluidsynth` the first time a `fluid` voice is selected or
+the MIDI device gets a message, and
 drives it through its command shell over a pipe (`noteon`, `select`, `cc`,
 ...). FluidSynth's JACK outputs are connected to crone's engine inputs (the
 same inputs SuperCollider uses). That means the **ENGINE** level, the norns
