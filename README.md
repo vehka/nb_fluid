@@ -29,12 +29,12 @@ Two ways in, both driving one shared FluidSynth instance:
   plays right away (see below).
 
   The package also installs a `fluidsynth` systemd user service and
-  enables it. It may show as inactive right after install, but it can start
-  on your next login or reboot. It would then run a second fluidsynth
-  alongside the mod's own. Disable it right after installing:
+  enables it for all users. It shows as inactive, but disable it so it can
+  never run a second fluidsynth alongside the mod's own. It is enabled
+  globally, so a plain `systemctl --user disable` won't do it:
 
   ```
-  systemctl --user disable --now fluidsynth
+  sudo systemctl --global disable fluidsynth.service
   ```
 
   `systemctl --user status fluidsynth` should then say `disabled`.
