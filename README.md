@@ -1,13 +1,14 @@
 # nb_fluid
 
 An [nb](https://llllllll.co/t/n-b-et-al-v0-1/60374) voice mod for norns that
-plays [FluidSynth](https://www.fluidsynth.org/): General MIDI sounds on norns
-from any SoundFont (`.sf2` / `.sf3`).
+plays [FluidSynth](https://www.fluidsynth.org/) on norns. It loads any
+SoundFont (`.sf2` / `.sf3`); with a General MIDI soundfont you get the full
+GM instrument set and drum kits.
 
 Two ways in, both driving one shared FluidSynth instance:
 
-- **nb voices** `fluid 1` … `fluid N`: each is one MIDI channel. Pick any of
-  the 128 GM programs, or switch a voice to drums and choose a drum kit.
+- **nb voices** `fluid 1` … `fluid N`: each is one MIDI channel. Pick a
+  program by its GM name, or switch a voice to drums and choose a drum kit.
 - **a virtual MIDI device** called `fluidsynth`: a 16-channel General MIDI
   synth for any script with MIDI out, e.g. a MIDI file player. The song
   picks its own instruments with program changes, and drums are on
@@ -95,7 +96,7 @@ remembers the assignment like it would for a hardware synth. Then point a
 script's MIDI output at that port. Handled messages:
 
 - note on/off
-- program change (with CC 0/32 bank select)
+- program change (with CC 0 bank select; CC 32 is ignored)
 - all CCs (volume, pan, expression, sustain, reverb/chorus sends,
   all-notes-off, …)
 - pitch bend
@@ -128,8 +129,16 @@ nb features:
 - **pitch bend** is supported; it bends the whole channel
 - **modulate** sends the mod wheel (CC 1), which is vibrato in most GM fonts
 
-Kits other than Standard need a soundfont that has them. FluidR3_GM and
-GeneralUser GS both do.
+The program and kit lists assume a GM soundfont: program N is preset N-1
+in bank 0, and the kits are the GS drum kits in bank 128. With a non-GM
+soundfont the names don't match what plays, so choose presets by bank and
+program number instead. A number with no preset behind it doesn't go
+silent: an nb voice keeps playing its previous preset, and a MIDI program
+change falls back to bank 0 (the same program, or else the first preset).
+Either way the log says so. The exception is MIDI channel 10, the drum
+channel: it only plays bank 128, so it is silent with a soundfont that has
+no drum kits. Kits other than Standard also need a soundfont that has them.
+FluidR3_GM and GeneralUser GS both do.
 
 ## How it works
 
