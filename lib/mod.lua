@@ -867,10 +867,15 @@ function m.redraw()
     end
     screen.text_right(value)
   end
-  screen.level(2)
-  screen.move(0, 62)
-  screen.text(ITEMS[m.item] == "voices" and "voices apply on next script load"
-    or "soundfont: also in PARAMS")
+  local hint = ({
+    soundfont = "soundfont: also in PARAMS",
+    voices = "voices apply on next script load",
+  })[ITEMS[m.item]]
+  if hint then
+    screen.level(2)
+    screen.move(0, 62)
+    screen.text(hint)
+  end
   screen.update()
 end
 
