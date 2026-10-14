@@ -166,7 +166,7 @@ function M.new_deps()
   for _, path in ipairs(DEFAULT_LINKS) do links[#links + 1] = q(path) end
   d:add { id = "soundfont", label = "default soundfont", optional = true,
           needs = { "fluidsynth" },
-          why = "links the system GM soundfont into the soundfont folder",
+          why = "links the GM soundfont",
           check_fn = function() return M.default_link() ~= nil end,
           cmd = "mkdir -p " .. q(M.SOUNDFONT_DIR)
             .. "; for f in " .. table.concat(candidates, " ") .. "; do"
