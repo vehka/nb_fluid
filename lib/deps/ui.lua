@@ -41,23 +41,28 @@ local function bar(x, y, w, h, frac, spin)
   screen.fill()
 end
 
+-- All items are installed (or removed) together with one K3; E2 only moves
+-- the highlight, to show each item's reason on the bottom line.
 local function draw_review(s)
   local removing = s.mode == "uninstall"
-  header(s, #s.items .. (removing and " to remove" or " to install"))
-  local first = math.max(1, math.min(s.sel - 1, #s.items - 2))
+  local n = #s.items
+  header(s, (removing and "remove " or "install ") .. n
+    .. (n == 1 and " item" or " items"))
+  local first = math.max(1, math.min(s.sel - 1, n - 2))
   for row = 0, 2 do
     local item = s.items[first + row]
     if item then
       local y = 20 + row * 9
-      local level = item == s.items[s.sel] and 15 or 6
-      local mark = item.blocked and "!" or (item == s.items[s.sel] and ">" or " ")
+      local level = (n > 1 and item == s.items[s.sel]) and 15 or 8
+      local mark = item.blocked and "!" or (removing and "-" or "+")
       text(0, y, mark .. " " .. trim(item.spec.label or item.spec.id, 90), level)
       if item.spec.size then text(127, y, item.spec.size, level, true) end
     end
   end
   local sel = s.items[s.sel]
-  text(0, 53, trim(sel.blocked or (not removing and sel.spec.why) or "", 127), 8)
-  footer("K2 cancel", removing and "K3 remove" or "K3 install")
+  text(0, 51, trim(sel.blocked or (not removing and sel.spec.why) or "", 127), 4)
+  local verb = removing and "K3 remove" or "K3 install"
+  footer("K2 cancel", n > 1 and verb .. " all" or verb)
 end
 
 local function draw_running(s)
@@ -127,32 +132,47 @@ local function draw_blocked(s)
   footer(#lines > 5 and "E2 scroll" or nil, "K2 close")
 end
 
+-- what happened to an item, for the done screen
+local function outcome(s, item)
+  if item.ok then return s.mode == "uninstall" and "removed" or "installed", 15 end
+  if item.blocked then return "skipped", 6 end
+  return "failed", 6
+end
+
+-- One line per item, so the steps that ran too fast to read can be checked
+-- afterwards; E2 scrolls when they don't fit.
 local function draw_done(s)
   local removing = s.mode == "uninstall"
-  if s.needs_restart then
+  if #s.items == 0 then
+    -- nothing ran: installed earlier, sclang not restarted since
     header(s, "restart needed")
     screen.level(15)
     screen.move(64, 30)
-    screen.text_center(removing and "removed. restart to" or "installed. restart to")
+    screen.text_center("installed. restart to")
     screen.move(64, 40)
-    screen.text_center(removing and "unload the UGens" or "load the new UGens")
+    screen.text_center("load the new UGens")
     footer("K2 later", "K3 restart")
-  elseif removing then
-    header(s, "removed")
-    screen.level(15)
-    screen.move(64, 36)
-    screen.text_center("dependencies")
-    screen.move(64, 46)
-    screen.text_center("removed")
-    footer(nil, "K3 ok")
+    return
+  end
+  header(s, s.needs_restart and "restart needed"
+    or (removing and "removed" or "done"))
+  local rows = s.needs_restart and 3 or 4
+  local first = math.max(0, math.min(s.scroll or 0, #s.items - rows))
+  for row = 1, rows do
+    local item = s.items[first + row]
+    if item then
+      local y = 11 + row * 9
+      local status, level = outcome(s, item)
+      text(0, y, trim(item.spec.label or item.spec.id, 80), level)
+      text(127, y, status, level, true)
+    end
+  end
+  if s.needs_restart then
+    text(0, 51, removing and "restart to unload UGens"
+      or "restart to load UGens", 15)
+    footer("K2 later", "K3 restart")
   else
-    header(s, "ready")
-    screen.level(15)
-    screen.move(64, 36)
-    screen.text_center("all dependencies")
-    screen.move(64, 46)
-    screen.text_center("in place")
-    footer(nil, "K3 ok")
+    footer(#s.items > rows and "E2 scroll" or nil, "K3 ok")
   end
 end
 
@@ -220,6 +240,9 @@ function M.enc(s, n, d)
     s.scroll = math.max(0, s.scroll - d)
   elseif s.state == "blocked" then
     s.scroll = math.max(0, (s.scroll or 0) + d)
+  elseif s.state == "done" then
+    local rows = s.needs_restart and 3 or 4
+    s.scroll = math.max(0, math.min(#s.items - rows, (s.scroll or 0) + d))
   end
 end
 
