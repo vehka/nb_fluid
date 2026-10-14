@@ -220,6 +220,7 @@ end
 
 local apply_all_voices
 local start
+local sync_shared_params
 -- voices a script is playing (see the voices section)
 local in_use = {}
 
@@ -303,6 +304,7 @@ start = function()
   fluid.soundfont = prefs.soundfont
   fluid.failed = false
   print("nb_fluid: started fluidsynth with " .. basename(prefs.soundfont))
+  sync_shared_params()
   connect_when_ready()
   -- commands queue in the FIFO until the soundfont has loaded
   apply_all_voices()
@@ -478,9 +480,18 @@ local function add_shared_params()
   params:hide(SHARED)
 end
 
--- the mod menu changed a shared setting
-local function sync_shared_params()
+-- the mod menu changed a shared setting, or fluidsynth (re)started, maybe
+-- after an install added soundfonts the list doesn't have yet
+sync_shared_params = function()
   if not has_shared_params() then return end
+  local found = find_soundfonts()
+  if #found > 0 then
+    shared_soundfonts = found
+    local param = params:lookup_param(SHARED .. "_soundfont")
+    param.options = {}
+    for idx, path in ipairs(found) do param.options[idx] = basename(path) end
+    param.count = #found
+  end
   for idx, path in ipairs(shared_soundfonts) do
     if path == prefs.soundfont then
       params:set(SHARED .. "_soundfont", idx, true)
