@@ -18,27 +18,8 @@ Two ways in, both driving one shared FluidSynth instance:
 
 - norns with the [nb](https://github.com/sixolet/nb) library (used by the
   script, not installed separately)
-- `fluidsynth` built with JACK support. On norns:
-
-  ```
-  sudo apt update
-  sudo apt install --no-install-recommends fluidsynth
-  ```
-
-  `--no-install-recommends` skips `qsynth`, a Qt GUI that is of no use on
-  norns. The package also brings in a small GM soundfont (TimGM6mb), so it
-  plays right away (see below).
-
-  The package also installs a `fluidsynth` systemd user service and
-  enables it for all users. It shows as inactive, but disable it so it can
-  never run a second fluidsynth alongside the mod's own. It is enabled
-  globally, so a plain `systemctl --user disable` won't do it:
-
-  ```
-  sudo systemctl --global disable fluidsynth.service
-  ```
-
-  `systemctl --user status fluidsynth` should then say `disabled`.
+- `fluidsynth` built with JACK support, and a system service that runs it.
+  The mod installs both itself, see below.
 
 ## Install
 
@@ -48,6 +29,44 @@ Two ways in, both driving one shared FluidSynth instance:
 
 Then enable it in **SYSTEM > MODS**, and restart norns.
 
+The first time a script selects a `fluid` voice (or sends to the
+`fluidsynth` MIDI device), the mod opens an install screen listing what is
+missing. K3 installs it, K2 cancels. You can also open it from
+**SYSTEM > MODS > NB_FLUID > setup**. It installs:
+
+- **FluidSynth**: `apt install --no-install-recommends fluidsynth`. Without
+  recommends, so it skips `qsynth`, a Qt GUI that is of no use on norns. The
+  package brings in a small GM soundfont (TimGM6mb), so it plays right away.
+- **fluidsynth user service off**: the package enables a `fluidsynth`
+  systemd user service for all users. It would never run on norns, but it
+  is disabled (`systemctl --global disable fluidsynth.service`) so it can't
+  start a second fluidsynth next to the mod's own.
+- **nb-fluid service**: `/etc/systemd/system/nb-fluid.service`, which runs
+  fluidsynth for the mod (see [How it works](#how-it-works)). It never
+  starts at boot, only when the mod needs it.
+- **default soundfont**: a link to the system GM soundfont in the
+  soundfont folder.
+
+Anything already in place is skipped. Installing uses `sudo`, which norns
+has without a password. The install screen comes from
+[norns-deps](https://github.com/vehka/norns-deps).
+
+## Uninstall
+
+**SYSTEM > MODS > NB_FLUID > uninstall**, K3 twice. It stops and removes
+the service, undoes the rest of the list above, deletes the mod and turns
+it off in SYSTEM > MODS. Then restart norns.
+
+Only what the mod installed itself is removed: if fluidsynth was installed
+before nb_fluid, it stays. Soundfonts you added to the soundfont folder
+stay too.
+
+[modhousekeeper](https://github.com/vehka/modhousekeeper)'s Remove does
+the same (it runs the mod's `lib/uninstall.lua` before deleting it).
+Deleting the mod any other way (maiden, `rm`) leaves the service and
+packages behind; the service then refuses to start, since the mod's files
+are gone.
+
 ## Soundfonts
 
 Put soundfonts in the mod's own folder:
@@ -56,19 +75,10 @@ Put soundfonts in the mod's own folder:
 ~/dust/data/nb_fluid/soundfonts/
 ```
 
-The folder is created when the mod loads. Choose the active soundfont in the
-mod menu.
-
-While that folder is empty, the mod uses the system soundfonts in
-`/usr/share/sounds/sf2/` and `/usr/share/sounds/sf3/` (Debian) or
-`/usr/share/soundfonts/` (Arch). On norns that means the TimGM6mb soundfont
-that came with fluidsynth: only ~6 MB, and it sounds thin. Once you add a
-soundfont of your own, only the mod's folder is used. Symlink a system
-soundfont there if you want to keep it in the list:
-
-```
-ln -s /usr/share/sounds/sf2/TimGM6mb.sf2 ~/dust/data/nb_fluid/soundfonts/
-```
+The folder is created when the mod loads. The install links the system's
+default GM soundfont into it as `default-GM.sf2`. On norns that is the
+TimGM6mb soundfont that came with fluidsynth: only ~6 MB, and it sounds
+thin.
 
 Better-sounding GM choices:
 
@@ -79,15 +89,28 @@ Better-sounding GM choices:
 Samples load on demand (`synth.dynamic-sample-loading`), so memory use
 follows the programs you actually select.
 
+## Choosing a soundfont
+
+The soundfont can be changed while a script plays, to audition soundfonts:
+in **PARAMS > fluid synth > soundfont** (shown while a script uses a
+`fluid` voice), or in the mod menu. The new soundfont is loaded into the
+running FluidSynth, every voice switches to the same program in it, and
+the old one is unloaded. Notes keep playing on the old soundfont until the
+new one has loaded, which takes a moment for big soundfonts.
+
+The choice is global, like the mod menu's, and not saved in psets.
+
 ## Mod menu
 
 **SYSTEM > MODS > NB_FLUID**, E2 selects, E3 changes:
 
-- **soundfont**: which file to load. FluidSynth restarts with the new font
-  when you leave the menu.
+- **soundfont**: which file to load, applied immediately
 - **voices**: number of `fluid N` voices, 1-16 (applies on the next script
   load)
-- **gain**: FluidSynth master gain, applied immediately
+- **gain**: FluidSynth master gain, applied immediately (also in PARAMS)
+- **setup**: `ok`, or how many dependencies are missing; K3 opens the
+  install screen
+- **uninstall**: K3, then K3 again to confirm
 
 ## MIDI device
 
@@ -142,15 +165,22 @@ FluidR3_GM and GeneralUser GS both do.
 
 ## How it works
 
-The mod starts `fluidsynth` the first time a `fluid` voice is selected or
-the MIDI device gets a message, and
-drives it through its command shell over a pipe (`noteon`, `select`, `cc`,
-...). FluidSynth's JACK outputs are connected to crone's engine inputs (the
-same inputs SuperCollider uses). That means the **ENGINE** level, the norns
-reverb, and tape recording all apply, as for any engine. FluidSynth keeps
-running across script changes, and quits when norns does.
+FluidSynth runs as the system service `nb-fluid.service`. The mod starts
+it (`sudo systemctl restart nb-fluid`) the first time a `fluid` voice is
+selected or the MIDI device gets a message, with the soundfont and gain
+from `~/dust/data/nb_fluid/service.env`, which the mod writes first. It
+drives FluidSynth through its command shell (`noteon`, `select`, `cc`,
+...), written to a named pipe, `/tmp/nb_fluid.fifo`. A service rather than a
+child process of norns, because the norns 3 beta can't write to a child
+process (`io.popen` in write mode).
 
-FluidSynth's output goes to `/tmp/nb_fluid.log`. Look there if nothing plays.
+FluidSynth's JACK outputs are connected to crone's engine inputs (the same
+inputs SuperCollider uses). That means the **ENGINE** level, the norns
+reverb, and tape recording all apply, as for any engine. FluidSynth keeps
+running across script changes, and stops when norns goes to sleep.
+
+FluidSynth's output goes to `/tmp/nb_fluid.log`. Look there if nothing
+plays, and at `systemctl status nb-fluid` if it doesn't start.
 
 ## License
 
