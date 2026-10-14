@@ -23,16 +23,22 @@ Two ways in, both driving one shared FluidSynth instance:
 
 ## Install
 
+From maiden's REPL:
+
 ```
 ;install https://github.com/vehka/nb_fluid
 ```
 
-Then enable it in **SYSTEM > MODS**, and restart norns.
+or with [modhousekeeper](https://github.com/vehka/modhousekeeper), which
+lists it under "Nota Bene (nb)". Then enable it in **SYSTEM > MODS**, and
+restart norns.
 
 The first time a script selects a `fluid` voice (or sends to the
 `fluidsynth` MIDI device), the mod opens an install screen listing what is
-missing. K3 installs it, K2 cancels. You can also open it from
-**SYSTEM > MODS > NB_FLUID > setup**. It installs:
+missing, e.g. "install 2 items". One K3 installs all of them, K2 cancels;
+E2 shows why each item is needed. When it is done, the screen lists each
+item as installed, skipped or failed, and K3 closes it. You can also open
+it from **SYSTEM > MODS > NB_FLUID > setup**. It installs:
 
 - **FluidSynth**: `apt install --no-install-recommends fluidsynth`. Without
   recommends, so it skips `qsynth`, a Qt GUI that is of no use on norns. The
@@ -47,15 +53,18 @@ missing. K3 installs it, K2 cancels. You can also open it from
 - **default soundfont**: a link to the system GM soundfont in the
   soundfont folder.
 
-Anything already in place is skipped. Installing uses `sudo`, which norns
-has without a password. The install screen comes from
+Anything already in place is left out of the list. The default soundfont
+is optional: if no system soundfont is found it is skipped, and the rest
+still installs. Installing uses `sudo`, which norns has without a
+password. The install screen comes from
 [norns-deps](https://github.com/vehka/norns-deps).
 
 ## Uninstall
 
-**SYSTEM > MODS > NB_FLUID > uninstall**, K3 twice. It stops and removes
-the service, undoes the rest of the list above, deletes the mod and turns
-it off in SYSTEM > MODS. Then restart norns.
+**SYSTEM > MODS > NB_FLUID > uninstall**, K3, then K3 again to confirm.
+A screen lists what the mod installed ("remove 2 items"); K3 removes all
+of it, and the screen ends with what was removed. The mod then deletes
+itself and turns itself off in SYSTEM > MODS. Restart norns afterwards.
 
 Only what the mod installed itself is removed: if fluidsynth was installed
 before nb_fluid, it stays. Soundfonts you added to the soundfont folder
@@ -110,7 +119,7 @@ The choice is global, like the mod menu's, and not saved in psets.
 - **gain**: FluidSynth master gain, applied immediately (also in PARAMS)
 - **setup**: `ok`, or how many dependencies are missing; K3 opens the
   install screen
-- **uninstall**: K3, then K3 again to confirm
+- **uninstall**: K3, then K3 again to confirm, see [Uninstall](#uninstall)
 
 ## MIDI device
 
