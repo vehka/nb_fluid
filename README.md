@@ -191,6 +191,13 @@ running across script changes, and stops when norns goes to sleep.
 FluidSynth's output goes to `/tmp/nb_fluid.log`. Look there if nothing
 plays, and at `systemctl status nb-fluid` if it doesn't start.
 
+If the mod menu's **setup** says `reboot needed`, JACK's files in
+`/dev/shm` are gone, so fluidsynth can't connect to JACK. On norns before
+the fix in monome/norns#1925, logging out of the last ssh session removes
+them. A reboot brings them back; to stop it happening, add
+`/etc/systemd/logind.conf.d/10-norns-removeipc.conf` with
+`[Login]` and `RemoveIPC=no`.
+
 ## License
 
 MIT

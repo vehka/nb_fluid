@@ -265,6 +265,13 @@ start = function()
       return false
     end
   end
+  -- after an ssh logout, logind may have removed JACK's shared memory:
+  -- running clients keep working, but fluidsynth could never connect
+  if d:jack_files_missing() then
+    print("nb_fluid: JACK's files in /dev/shm are gone (an ssh logout"
+      .. " removes them on older norns); reboot to play fluid voices")
+    return false
+  end
   if prefs.soundfont == nil or not util.file_exists(prefs.soundfont) then
     prefs.soundfont = find_soundfonts()[1]
   end
@@ -753,6 +760,7 @@ function m.init()
   read_prefs()
   refresh_soundfonts()
   m.missing = get_deps():missing()
+  m.jack_gone = get_deps():jack_files_missing()
   m.uninstall = m.uninstall == "done" and "done" or nil
 end
 
@@ -860,7 +868,8 @@ function m.redraw()
     #m.soundfonts > 0 and basename(prefs.soundfont) or "none found",
     prefs.voices,
     string.format("%.2f", prefs.gain),
-    #m.missing == 0 and "ok" or (#m.missing .. " missing, K3"),
+    #m.missing > 0 and (#m.missing .. " missing, K3")
+      or (m.jack_gone and "reboot needed" or "ok"),
     "K3",
   }
   -- five rows from y=20; the hint takes the bottom line
@@ -881,6 +890,7 @@ function m.redraw()
   local hint = ({
     soundfont = "soundfont: also in PARAMS",
     voices = "voices apply on next script load",
+    setup = m.jack_gone and #m.missing == 0 and "JACK's files are gone" or nil,
   })[ITEMS[m.item]]
   if hint then
     screen.level(2)
