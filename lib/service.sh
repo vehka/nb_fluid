@@ -11,4 +11,5 @@ exec 3<>"$FIFO"
 exec fluidsynth -a jack -n -r "$SAMPLE_RATE" \
   -o audio.jack.id="$JACK_ID" -o audio.jack.autoconnect=0 \
   -o synth.polyphony="$POLYPHONY" -o synth.dynamic-sample-loading=1 \
+  -o synth.midi-channels=32 \
   -g "$GAIN" "$SOUNDFONT" <&3 3<&- >"$LOG" 2>&1

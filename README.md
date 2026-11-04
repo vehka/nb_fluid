@@ -9,10 +9,13 @@ Two ways in, both driving one shared FluidSynth instance:
 
 - **nb voices** `fluid 1` … `fluid N`: each is one MIDI channel. Pick a
   program by its GM name, or switch a voice to drums and choose a drum kit.
-- **a virtual MIDI device** called `fluidsynth`: a 16-channel General MIDI
-  synth for any script with MIDI out, e.g. a MIDI file player. The song
-  picks its own instruments with program changes, and drums are on
-  channel 10.
+- **two virtual MIDI devices** called `fluidsynth` and `fluidsynth 2`: each
+  a 16-channel General MIDI synth for any script with MIDI out, e.g. a MIDI
+  file player. The song picks its own instruments with program changes,
+  and drums are on channel 10.
+
+Two soundfonts can be loaded at once: `fluidsynth` plays soundfont 1,
+`fluidsynth 2` plays soundfont 2, and each nb voice can use either.
 
 ## Requirements
 
@@ -34,7 +37,7 @@ lists it under "Nota Bene (nb)". Then enable it in **SYSTEM > MODS**, and
 restart norns.
 
 The first time a script selects a `fluid` voice (or sends to the
-`fluidsynth` MIDI device), the mod opens an install screen listing what is
+a `fluidsynth` MIDI device), the mod opens an install screen listing what is
 missing, e.g. "install 2 items". One K3 installs all of them, K2 cancels;
 E2 shows why each item is needed. When it is done, the screen lists each
 item as installed, skipped or failed, and K3 closes it. You can also open
@@ -98,22 +101,31 @@ Better-sounding GM choices:
 Samples load on demand (`synth.dynamic-sample-loading`), so memory use
 follows the programs you actually select.
 
-## Choosing a soundfont
+## Choosing soundfonts
 
-The soundfont can be changed while a script plays, to audition soundfonts:
-in **PARAMS > fluid synth > soundfont** (shown while a script uses a
-`fluid` voice), or in the mod menu. The new soundfont is loaded into the
-running FluidSynth, every voice switches to the same program in it, and
-the old one is unloaded. Notes keep playing on the old soundfont until the
-new one has loaded, which takes a moment for big soundfonts.
+There are two soundfont settings:
 
-The choice is global, like the mod menu's, and not saved in psets.
+- **soundfont**: soundfont 1, for the `fluidsynth` MIDI device and for nb
+  voices set to soundfont 1
+- **soundfont 2**: for the `fluidsynth 2` MIDI device and for nb voices set
+  to soundfont 2. `same as 1` (the default) plays soundfont 1, and loads
+  nothing extra.
+
+Both can be changed while a script plays, to audition soundfonts: in
+**PARAMS > fluid synth** (shown while a script uses a `fluid` voice), or in
+the mod menu. The new soundfont is loaded into the running FluidSynth,
+every channel using it switches to the same program in it, and the old one
+is unloaded. Notes keep playing on the old soundfont until the new one has
+loaded, which takes a moment for big soundfonts.
+
+The choices are global, like the mod menu's, and not saved in psets.
 
 ## Mod menu
 
 **SYSTEM > MODS > NB_FLUID**, E2 selects, E3 changes:
 
-- **soundfont**: which file to load, applied immediately
+- **soundfont**: soundfont 1, applied immediately
+- **soundfont 2**: soundfont 2, or `same as 1`, applied immediately
 - **voices**: number of `fluid N` voices, 1-16 (applies on the next script
   load)
 - **gain**: FluidSynth master gain, applied immediately (also in PARAMS)
@@ -121,24 +133,31 @@ The choice is global, like the mod menu's, and not saved in psets.
   install screen
 - **uninstall**: K3, then K3 again to confirm, see [Uninstall](#uninstall)
 
-## MIDI device
+## MIDI devices
 
-In **SYSTEM > DEVICES > MIDI**, assign `fluidsynth` to a port. norns
-remembers the assignment like it would for a hardware synth. Then point a
-script's MIDI output at that port. Handled messages:
+In **SYSTEM > DEVICES > MIDI**, assign `fluidsynth` (and `fluidsynth 2`, if
+you want the second soundfont) to a port. norns remembers the assignment
+like it would for a hardware synth. Then point a script's MIDI output at
+that port. Each device has its own 16 channels: `fluidsynth` plays
+soundfont 1, `fluidsynth 2` soundfont 2. Two scripts, or one script with
+two MIDI outputs, can play two songs with different soundfonts at once.
+Handled messages:
 
 - note on/off
 - program change (with CC 0 bank select; CC 32 is ignored)
 - all CCs (volume, pan, expression, sustain, reverb/chorus sends,
   all-notes-off, …)
 - pitch bend
-- GM / GS / XG reset SysEx
+- GM / GS / XG reset SysEx (resets only the device it was sent to)
 
 Aftertouch is ignored.
 
-MIDI channel N and nb voice `fluid N` are the same FluidSynth channel. An nb
-voice only takes over its channel while a script is using it. So for a
-multi-channel song, send it through the MIDI device rather than an nb voice.
+MIDI channel N on `fluidsynth` and nb voice `fluid N` are the same
+FluidSynth channel; `fluidsynth 2` has channels of its own. An nb voice
+only takes over its channel while a script is using it. So for a
+multi-channel song, send it through a MIDI device rather than an nb voice.
+
+Both devices share FluidSynth's 64-voice polyphony.
 
 ## Voice params
 
@@ -146,6 +165,7 @@ Once a script selects a `fluid N` voice, its param group shows up:
 
 | param      | what it does                                          |
 |------------|-------------------------------------------------------|
+| soundfont  | 1 or 2: which soundfont the voice plays (see [Choosing soundfonts](#choosing-soundfonts)) |
 | kind       | melodic, or drums (bank 128)                          |
 | program    | GM program (melodic)                                  |
 | bank       | bank select for non-GM variations (melodic)           |
@@ -166,20 +186,24 @@ in bank 0, and the kits are the GS drum kits in bank 128. With a non-GM
 soundfont the names don't match what plays, so choose presets by bank and
 program number instead. A number with no preset behind it doesn't go
 silent: an nb voice keeps playing its previous preset, and a MIDI program
-change falls back to bank 0 (the same program, or else the first preset).
-Either way the log says so. The exception is MIDI channel 10, the drum
-channel: it only plays bank 128, so it is silent with a soundfont that has
-no drum kits. Kits other than Standard also need a soundfont that has them.
+change falls back to bank 0 (the same program, or else program 1), or
+else to the soundfont's first preset. Either way the log says so. The
+exception is MIDI channel 10, the drum channel of each device: it only
+plays bank 128, so it is silent with a soundfont that has no drum kits. Kits other than Standard also need a soundfont that has them.
 FluidR3_GM and GeneralUser GS both do.
 
 ## How it works
 
 FluidSynth runs as the system service `nb-fluid.service`. The mod starts
 it (`sudo systemctl restart nb-fluid`) the first time a `fluid` voice is
-selected or the MIDI device gets a message, with the soundfont and gain
+selected or a MIDI device gets a message, with soundfont 1 and the gain
 from `~/dust/data/nb_fluid/service.env`, which the mod writes first. It
 drives FluidSynth through its command shell (`noteon`, `select`, `cc`,
-...), written to a named pipe, `/tmp/nb_fluid.fifo`. A service rather than a
+...), written to a named pipe, `/tmp/nb_fluid.fifo`. FluidSynth runs with
+32 MIDI channels: 1-16 for `fluidsynth` (and the nb voices), 17-32 for
+`fluidsynth 2`. Since FluidSynth's own program change searches every loaded
+soundfont, the mod picks each channel's preset itself, from the
+soundfont's preset list (`inst`), and selects it by soundfont. A service rather than a
 child process of norns, because the norns 3 beta can't write to a child
 process (`io.popen` in write mode).
 

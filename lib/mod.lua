@@ -5,7 +5,9 @@
 -- that the mod starts on demand and feeds shell commands through a FIFO.
 -- its JACK outputs are wired into crone's engine inputs, so it follows
 -- the ENGINE level and the norns reverb / tape like any engine would.
--- each nb voice "fluid N" plays MIDI channel N.
+-- each nb voice "fluid N" plays MIDI channel N, with either soundfont.
+-- two MIDI devices, "fluidsynth" and "fluidsynth 2", play soundfont 1 and
+-- 2 on fluidsynth channels 0-15 and 16-31.
 
 local mod = require 'core/mods'
 
@@ -25,6 +27,9 @@ local ROUTES = {
   { JACK_ID .. ":right", "crone:input_6" },
 }
 local MAX_VOICES = 16
+-- each MIDI device has 16; service.sh starts fluidsynth with all of them
+local DEVICE_CHANNELS = 16
+local CHANNELS = 2 * DEVICE_CHANNELS
 local POLYPHONY = 64
 -- norns runs JACK at 48k; fluidsynth's reverb can't follow a later rate change
 local SAMPLE_RATE = 48000
@@ -34,6 +39,8 @@ local REQUIRED = { "fluidsynth", "service" }
 local prefs = {
   voices = 4,
   soundfont = nil,
+  -- nil: soundfont 2 is the same as soundfont 1
+  soundfont2 = nil,
   gain = 0.5,
 }
 
@@ -43,11 +50,12 @@ local fluid = {
   pid = nil,
   started_at = 0,
   checked_at = 0,
-  -- fluidsynth numbers soundfonts per process, counting every load
-  sfont_id = 1,
-  soundfont = nil,
-  -- a soundfont being loaded into the running fluidsynth
-  loading = nil,
+  -- the soundfonts loaded in slots 1 and 2: { id, path, presets, first },
+  -- see the soundfonts section. fluidsynth numbers soundfonts per process,
+  -- counting every load.
+  sf = { {}, {} },
+  -- a soundfont load or preset listing in progress
+  job = nil,
   -- set when starting failed, so note_on doesn't retry on every note
   failed = false,
   -- the install screen was offered this session
@@ -111,7 +119,7 @@ local function close_fifo()
     fluid.out:close()
     fluid.out = nil
   end
-  fluid.loading = nil
+  fluid.job = nil
 end
 
 local function read_from(path, offset)
@@ -221,6 +229,8 @@ end
 local apply_all_voices
 local start
 local sync_shared_params
+local reset_chans
+local list_presets
 -- voices a script is playing (see the voices section)
 local in_use = {}
 
@@ -279,12 +289,18 @@ start = function()
     print("nb_fluid: no soundfont found; put a .sf2 in " .. SOUNDFONT_DIR)
     return false
   end
+  if prefs.soundfont2 and not util.file_exists(prefs.soundfont2) then
+    prefs.soundfont2 = nil
+  end
 
   setup.write_env {
     soundfont = prefs.soundfont, gain = prefs.gain,
     sample_rate = SAMPLE_RATE, polyphony = POLYPHONY, jack_id = JACK_ID,
   }
   os.remove(setup.PIDFILE)
+  -- the soundfont jobs read fluidsynth's answers from the log, so nothing
+  -- from an earlier run may be left in it
+  os.remove(LOG_FILE)
   local q = setup.deps.platform.shell_quote
   if not os.execute("[ -p " .. q(FIFO) .. " ] || { rm -f " .. q(FIFO)
       .. " && mkfifo -m 600 " .. q(FIFO) .. "; }") then
@@ -307,14 +323,17 @@ start = function()
   fluid.pid = nil
   fluid.started_at = util.time()
   fluid.checked_at = fluid.started_at
-  fluid.sfont_id = 1
-  fluid.soundfont = prefs.soundfont
+  -- the soundfont on fluidsynth's command line is its number 1
+  fluid.sf = { { id = 1, path = prefs.soundfont }, {} }
+  reset_chans()
   fluid.failed = false
   print("nb_fluid: started fluidsynth with " .. basename(prefs.soundfont))
   sync_shared_params()
   connect_when_ready()
   -- commands queue in the FIFO until the soundfont has loaded
   apply_all_voices()
+  -- then soundfont 2 loads, if there is one
+  list_presets(1)
   return true
 end
 
@@ -323,50 +342,238 @@ local function stop()
   setup.priv("systemctl stop " .. setup.UNIT)
 end
 
--- Swap the soundfont in the running fluidsynth: load the new one, point
--- the voices at it, unload the old one. fluidsynth reports the new id in
--- its output (the log), so a failed load can't throw the ids off.
--- Notes keep playing on the old soundfont until the new one has loaded.
-local function load_soundfont(path)
-  if not fluid.out or fluid.loading or path == fluid.soundfont then return end
-  if not util.file_exists(path) then return end
-  local offset = file_size(LOG_FILE)
-  fluid.loading = path
-  send("load " .. shell_path(path))
+------------------------------------------------------------------------
+-- soundfonts
+--
+-- Two soundfonts can be loaded at once. Slot 1 plays the "fluidsynth" MIDI
+-- device (channels 0-15), slot 2 the "fluidsynth 2" device (channels
+-- 16-31), and each nb voice picks one. With no second soundfont, slot 2
+-- plays slot 1's.
+--
+-- fluidsynth's own program change searches every loaded soundfont, so
+-- programs are always chosen with "select", which names the soundfont.
+-- Its fallbacks for a missing preset are redone here, from each
+-- soundfont's preset list ("inst"). Loads and unloads pass reset 0, so
+-- fluidsynth doesn't re-pick every channel's program by itself.
+
+local function slot_of(ch)
+  return ch < DEVICE_CHANNELS and 1 or 2
+end
+
+-- the file a slot should have loaded; nil for slot 2: same as slot 1
+local function wanted(slot)
+  if slot == 1 then return prefs.soundfont end
+  if prefs.soundfont2 ~= prefs.soundfont then return prefs.soundfont2 end
+end
+
+-- the loaded soundfont a slot plays
+local function playing(slot)
+  local sf = fluid.sf[slot]
+  return sf.id and sf or fluid.sf[1]
+end
+
+local function has_preset(sf, bank, prog)
+  return sf.presets[bank * 128 + prog] ~= nil
+end
+
+-- The preset to play for a bank and program, with fluidsynth's fallbacks:
+-- drums try the same program in bank 128, then the standard kit; melodic
+-- programs try bank 0, then its first program, then the soundfont's first
+-- preset. nil when there's nothing to play. Without a preset list (not
+-- read yet), fluidsynth gets to try the bank and program as they are.
+local function find_preset(sf, bank, prog, drums)
+  if not sf.presets then return bank, prog end
+  local tries = drums and { { bank, prog }, { 128, prog }, { 128, 0 } }
+    or { { bank, prog }, { 0, prog }, { 0, 0 }, sf.first }
+  for _, t in ipairs(tries) do
+    if has_preset(sf, t[1], t[2]) then return t[1], t[2] end
+  end
+end
+
+-- what each channel's MIDI asked for: bank select (CC 0) and program
+local chans = {}
+
+local function reset_chan(ch)
+  chans[ch] = { bank = 0, prog = 0 }
+end
+
+reset_chans = function()
+  for ch = 0, CHANNELS - 1 do reset_chan(ch) end
+end
+reset_chans()
+
+-- Point a channel at its device's soundfont, at the program its MIDI
+-- asked for. Channel 10 of each device is the drum channel.
+local function apply_channel(ch, quiet)
+  local sf = playing(slot_of(ch))
+  if not sf.id then return end
+  local drums = ch % DEVICE_CHANNELS == 9
+  local want_bank = (drums and 128 or 0) + chans[ch].bank
+  local want_prog = chans[ch].prog
+  local bank, prog = find_preset(sf, want_bank, want_prog, drums)
+  if bank == nil then
+    if not quiet then
+      print(string.format("nb_fluid: %s has nothing to play for bank %d"
+        .. " program %d (channel %d)", basename(sf.path), want_bank, want_prog,
+        ch))
+    end
+    -- program 128 means none: the channel goes silent
+    send(string.format("prog %d 128", ch))
+    return
+  end
+  if not quiet and (bank ~= want_bank or prog ~= want_prog) then
+    print(string.format("nb_fluid: %s has no bank %d program %d, playing"
+      .. " %d:%d (channel %d)", basename(sf.path), want_bank, want_prog,
+      bank, prog, ch))
+  end
+  send(string.format("select %d %d %d %d", ch, sf.id, bank, prog))
+end
+
+-- after a soundfont change: every channel, then the voices on top
+local function apply_all()
+  for ch = 0, CHANNELS - 1 do apply_channel(ch, true) end
+  apply_all_voices()
+end
+
+-- A job loads a soundfont into a slot and reads its preset list, both
+-- from fluidsynth's answers in the log: "loaded SoundFont has ID n", then
+-- the "inst n" lines up to an echoed marker. fluid.job is { slot, path,
+-- offset, started, loaded, id, presets, first }; id is known once the
+-- soundfont has loaded. One job runs at a time.
+
+local sync_soundfonts
+
+local function marker(id)
+  return "nb_fluid_presets_" .. id
+end
+
+local function request_presets(job)
+  job.offset = file_size(LOG_FILE)
+  send("inst " .. job.id)
+  send("echo " .. marker(job.id))
+end
+
+-- true once the job's soundfont is loaded and its presets are read
+local function step_job(job)
+  local out = read_from(LOG_FILE, job.offset)
+  if not job.id then
+    local id = out:match("loaded SoundFont has ID (%d+)")
+    if id then
+      job.id = tonumber(id)
+      request_presets(job)
+    elseif out:match("failed to load the SoundFont") then
+      return true
+    end
+    return false
+  end
+  local presets, first, mark = {}, nil, marker(job.id)
+  -- whole lines only; the shell's "> " prompt may come first
+  for raw in out:gmatch("([^\n]*)\n") do
+    local line = raw:gsub("^[> ]+", "")
+    if line == mark then
+      job.presets, job.first = presets, first
+      return true
+    end
+    local bank, prog = line:match("^(%d+)%-(%d+) ")
+    if bank then
+      bank, prog = tonumber(bank), tonumber(prog)
+      presets[bank * 128 + prog] = true
+      first = first or { bank, prog }
+    end
+  end
+  return false
+end
+
+local function finish_job(job)
+  fluid.job = nil
+  local sf = fluid.sf[job.slot]
+  if not job.id then
+    sf.failed = job.path
+    print("nb_fluid: couldn't load " .. basename(job.path) .. ", see " .. LOG_FILE)
+  else
+    if not job.presets then
+      print("nb_fluid: couldn't read the presets of " .. basename(job.path))
+    end
+    local old = sf.id ~= job.id and sf.id or nil
+    fluid.sf[job.slot] = {
+      id = job.id, path = job.path, presets = job.presets, first = job.first,
+    }
+    apply_all()
+    if old then send("unload " .. old .. " 0") end
+    if job.loaded then
+      print("nb_fluid: soundfont " .. job.slot .. " is now " .. basename(job.path))
+    end
+  end
+  sync_soundfonts()
+end
+
+-- Polls the log for the job. Started again in script_pre_init, since
+-- loading a script cancels the mod's clocks too.
+local function watch_job()
+  local job = fluid.job
+  if not job then return end
+  local token = {}
+  job.watcher = token
   clock.run(function()
-    -- big soundfonts take a while on a pi
-    for _ = 1, 240 do
-      clock.sleep(0.25)
-      if fluid.loading ~= path then return end
-      local out = read_from(LOG_FILE, offset)
-      local id = out:match("loaded SoundFont has ID (%d+)")
-      if id then
-        local old = fluid.sfont_id
-        fluid.sfont_id = tonumber(id)
-        fluid.soundfont = path
-        fluid.loading = nil
-        apply_all_voices()
-        send("unload " .. old)
-        print("nb_fluid: switched to " .. basename(path))
-        -- changed again while this one was loading
-        if prefs.soundfont ~= path then load_soundfont(prefs.soundfont) end
-        return
-      elseif out:match("failed to load the SoundFont") then
-        fluid.loading = nil
-        print("nb_fluid: couldn't load " .. basename(path) .. ", see " .. LOG_FILE)
+    while fluid.job == job and job.watcher == token do
+      -- big soundfonts take a while on a pi
+      if step_job(job) or util.time() - job.started > 60 then
+        finish_job(job)
         return
       end
+      clock.sleep(0.25)
     end
-    fluid.loading = nil
-    print("nb_fluid: " .. basename(path) .. " didn't load in time")
   end)
 end
 
--- the soundfont for the next start, and the running fluidsynth if any
-local function set_soundfont(path)
-  prefs.soundfont = path
+-- the presets of the soundfont fluidsynth started with
+list_presets = function(slot)
+  local sf = fluid.sf[slot]
+  fluid.job = { slot = slot, path = sf.path, id = sf.id, started = util.time() }
+  request_presets(fluid.job)
+  -- the log was removed before the start; fluidsynth writes a new one
+  fluid.job.offset = 0
+  watch_job()
+end
+
+-- Brings the loaded soundfonts in line with the prefs, one load at a
+-- time. Notes keep playing on the old soundfont until the new one has
+-- loaded; then the channels move over, and the old one is unloaded.
+sync_soundfonts = function()
+  if not fluid.out or fluid.job then return end
+  for slot = 1, 2 do
+    local sf, path = fluid.sf[slot], wanted(slot)
+    if path ~= sf.path and (path == nil or path ~= sf.failed) then
+      if path == nil then
+        -- slot 2 back to the same as slot 1
+        local old = sf.id
+        fluid.sf[slot] = {}
+        apply_all()
+        send("unload " .. old .. " 0")
+        print("nb_fluid: soundfont 2 is now the same as soundfont 1")
+      elseif util.file_exists(path) then
+        fluid.job = {
+          slot = slot, path = path, offset = file_size(LOG_FILE),
+          started = util.time(), loaded = true,
+        }
+        send("load " .. shell_path(path) .. " 0")
+        watch_job()
+        return
+      end
+    end
+  end
+end
+
+-- the soundfont for the next start, and the running fluidsynth if any;
+-- nil for slot 2: the same as slot 1
+local function set_soundfont(slot, path)
+  if slot == 1 then
+    prefs.soundfont = path
+  else
+    prefs.soundfont2 = path
+  end
   write_prefs()
-  load_soundfont(path)
+  sync_soundfonts()
 end
 
 local function set_gain(gain)
@@ -403,15 +610,25 @@ local function voice_cc(i, num, val)
   end
 end
 
+-- A preset the soundfont doesn't have isn't selected: the voice keeps
+-- playing what it had, rather than jumping to a fallback while someone
+-- scrolls through bank numbers.
 local function apply_program(i)
   if not owns(i) then return end
+  local sf = playing(params:get(p(i, "soundfont")))
+  if not sf.id then return end
+  local bank, prog
   if params:get(p(i, "kind")) == 2 then
-    local kit = gm.drum_kits[params:get(p(i, "kit"))]
-    send(string.format("select %d %d 128 %d", i - 1, fluid.sfont_id, kit.prog))
+    bank, prog = 128, gm.drum_kits[params:get(p(i, "kit"))].prog
   else
-    send(string.format("select %d %d %d %d", i - 1, fluid.sfont_id,
-      params:get(p(i, "bank")), params:get(p(i, "program")) - 1))
+    bank, prog = params:get(p(i, "bank")), params:get(p(i, "program")) - 1
   end
+  if sf.presets and not has_preset(sf, bank, prog) then
+    print(string.format("nb_fluid: fluid %d: %s has no bank %d program %d",
+      i, basename(sf.path), bank, prog))
+    return
+  end
+  send(string.format("select %d %d %d %d", i - 1, sf.id, bank, prog))
 end
 
 local function apply_voice(i)
@@ -431,7 +648,7 @@ apply_all_voices = function()
 end
 
 local function all_sound_off()
-  for ch = 0, MAX_VOICES - 1 do
+  for ch = 0, CHANNELS - 1 do
     cc(ch, 120, 0)
     cc(ch, 121, 0)
   end
@@ -444,11 +661,12 @@ local function update_visibility(i)
   params[drums and "show" or "hide"](params, p(i, "kit"))
 end
 
--- soundfont and gain, shared by all voices (and the MIDI device). Shown
--- while a fluid voice is in use; changing the soundfont swaps it in the
--- running fluidsynth, so soundfonts can be auditioned while playing.
+-- the soundfonts and gain, shared by all voices (and the MIDI devices).
+-- Shown while a fluid voice is in use; changing a soundfont swaps it in
+-- the running fluidsynth, so soundfonts can be auditioned while playing.
 -- Global settings like the mod menu's, so not saved in psets.
 local SHARED = "nb_fluid_synth"
+local SAME = "same as 1"
 local shared_soundfonts = {}
 
 local function has_shared_params()
@@ -460,19 +678,41 @@ local function update_shared_visibility()
   params[next(in_use) and "show" or "hide"](params, SHARED)
 end
 
-local function add_shared_params()
-  shared_soundfonts = find_soundfonts()
-  local names, current = {}, 1
-  for idx, path in ipairs(shared_soundfonts) do
+-- the option lists for soundfont 1, and soundfont 2 ("same as 1" first)
+local function soundfont_options(found)
+  local names, names2 = {}, { SAME }
+  for idx, path in ipairs(found) do
     names[idx] = basename(path)
-    if path == prefs.soundfont then current = idx end
+    names2[idx + 1] = names[idx]
   end
   if #names == 0 then names = { "none found" } end
-  params:add_group(SHARED, "fluid synth", 2)
-  params:add_option(SHARED .. "_soundfont", "soundfont", names, current)
+  return names, names2
+end
+
+-- which option is each slot's soundfont
+local function soundfont_indexes(found)
+  local idx1, idx2 = 1, 1
+  for idx, path in ipairs(found) do
+    if path == prefs.soundfont then idx1 = idx end
+    if path == prefs.soundfont2 then idx2 = idx + 1 end
+  end
+  return idx1, idx2
+end
+
+local function add_shared_params()
+  shared_soundfonts = find_soundfonts()
+  local names, names2 = soundfont_options(shared_soundfonts)
+  local idx1, idx2 = soundfont_indexes(shared_soundfonts)
+  params:add_group(SHARED, "fluid synth", 3)
+  params:add_option(SHARED .. "_soundfont", "soundfont", names, idx1)
   params:set_action(SHARED .. "_soundfont", function(idx)
     local path = shared_soundfonts[idx]
-    if path and path ~= prefs.soundfont then set_soundfont(path) end
+    if path and path ~= prefs.soundfont then set_soundfont(1, path) end
+  end)
+  params:add_option(SHARED .. "_soundfont2", "soundfont 2", names2, idx2)
+  params:set_action(SHARED .. "_soundfont2", function(idx)
+    local path = shared_soundfonts[idx - 1]
+    if path ~= prefs.soundfont2 then set_soundfont(2, path) end
   end)
   params:add_control(SHARED .. "_gain", "gain",
     controlspec.new(0, 2, "lin", 0.05, prefs.gain))
@@ -483,34 +723,37 @@ local function add_shared_params()
     end
   end)
   params:set_save(SHARED .. "_soundfont", false)
+  params:set_save(SHARED .. "_soundfont2", false)
   params:set_save(SHARED .. "_gain", false)
   params:hide(SHARED)
 end
 
 -- the mod menu changed a shared setting, or fluidsynth (re)started, maybe
--- after an install added soundfonts the list doesn't have yet
+-- after an install added soundfonts the lists don't have yet
 sync_shared_params = function()
   if not has_shared_params() then return end
   local found = find_soundfonts()
   if #found > 0 then
     shared_soundfonts = found
-    local param = params:lookup_param(SHARED .. "_soundfont")
-    param.options = {}
-    for idx, path in ipairs(found) do param.options[idx] = basename(path) end
-    param.count = #found
-  end
-  for idx, path in ipairs(shared_soundfonts) do
-    if path == prefs.soundfont then
-      params:set(SHARED .. "_soundfont", idx, true)
+    local names, names2 = soundfont_options(found)
+    for id, options in pairs { _soundfont = names, _soundfont2 = names2 } do
+      local param = params:lookup_param(SHARED .. id)
+      param.options = options
+      param.count = #options
     end
   end
+  local idx1, idx2 = soundfont_indexes(shared_soundfonts)
+  params:set(SHARED .. "_soundfont", idx1, true)
+  params:set(SHARED .. "_soundfont2", idx2, true)
   params:set(SHARED .. "_gain", prefs.gain, true)
 end
 
 local function add_fluid_params(i)
   -- nb adds players' params in name order, so fluid 1 comes first
   if i == 1 then add_shared_params() end
-  params:add_group(p(i, "group"), "fluid " .. i, 9)
+  params:add_group(p(i, "group"), "fluid " .. i, 10)
+  params:add_option(p(i, "soundfont"), "soundfont", { "1", "2" }, 1)
+  params:set_action(p(i, "soundfont"), function() apply_program(i) end)
   params:add_option(p(i, "kind"), "kind", { "melodic", "drums" }, 1)
   params:set_action(p(i, "kind"), function(kind)
     update_visibility(i)
@@ -623,13 +866,18 @@ local function add_fluid_player(i)
 end
 
 ------------------------------------------------------------------------
--- virtual MIDI device
+-- virtual MIDI devices
 --
--- "fluidsynth" shows up in SYSTEM > DEVICES > MIDI like a plugged-in
--- synth, so scripts with MIDI out (e.g. MIDI file players) can play all
--- 16 channels General MIDI style: programs, CCs, bend, drums on 10.
+-- "fluidsynth" and "fluidsynth 2" show up in SYSTEM > DEVICES > MIDI like
+-- plugged-in synths, so scripts with MIDI out (e.g. MIDI file players) can
+-- play 16 channels each General MIDI style: programs, CCs, bend, drums on
+-- 10. The first plays soundfont 1 on fluidsynth channels 0-15, the second
+-- soundfont 2 on channels 16-31.
 
-local MIDI_DEVICE_ID = "nb_fluid"
+local DEVICES = {
+  { id = "nb_fluid", name = "fluidsynth" },
+  { id = "nb_fluid_2", name = "fluidsynth 2" },
+}
 
 local function is_reset_sysex(data, first, last)
   local msg = table.concat(data, " ", first, last)
@@ -638,7 +886,28 @@ local function is_reset_sysex(data, first, last)
     or msg:match("^240 67 %d+ 76 0 0 126 0 247$") -- XG system on
 end
 
-local function midi_to_fluid(data)
+-- A GM / GS / XG reset of one device's channels. fluidsynth's own "reset"
+-- would reset the other device too, and pick programs from either
+-- soundfont. This restores what its reset does to a channel.
+local function reset_device(base)
+  for ch = base, base + DEVICE_CHANNELS - 1 do
+    cc(ch, 120, 0) -- all sound off
+    cc(ch, 121, 0) -- reset all controllers
+    -- what CC 121 leaves alone: volume, pan, balance, effect sends,
+    -- sound controllers
+    cc(ch, 7, 100)
+    cc(ch, 10, 64)
+    cc(ch, 8, 64)
+    for num = 91, 95 do cc(ch, num, 0) end
+    for num = 70, 79 do cc(ch, num, 64) end
+    send(string.format("pitch_bend_range %d 2", ch))
+    reset_chan(ch)
+    apply_channel(ch, true)
+  end
+  apply_all_voices()
+end
+
+local function midi_to_fluid(data, base)
   local i = 1
   while i <= #data do
     local status = data[i]
@@ -648,24 +917,29 @@ local function midi_to_fluid(data)
         last = last + 1
       end
       if is_reset_sysex(data, i, last) then
-        send("reset")
-        apply_all_voices()
+        reset_device(base)
       end
       i = last + 1
     elseif status >= 0xF0 then
       -- system common / realtime (clock, start, stop...): nothing to play
       i = i + ((status == 0xF2) and 3 or (status == 0xF1 or status == 0xF3) and 2 or 1)
     elseif status >= 0x80 then
-      local kind, ch = status & 0xF0, status & 0x0F
+      local kind, ch = status & 0xF0, base + (status & 0x0F)
       local a, b = data[i + 1] or 0, data[i + 2] or 0
       if kind == 0x90 and b > 0 then
         send(string.format("noteon %d %d %d", ch, a, b))
       elseif kind == 0x80 or kind == 0x90 then
         send(string.format("noteoff %d %d", ch, a))
       elseif kind == 0xB0 then
-        send(string.format("cc %d %d %d", ch, a, b))
+        -- bank select is kept for the next program change; CC 32 is ignored
+        if a == 0 then
+          chans[ch].bank = b
+        elseif a ~= 32 then
+          send(string.format("cc %d %d %d", ch, a, b))
+        end
       elseif kind == 0xC0 then
-        send(string.format("prog %d %d", ch, a))
+        chans[ch].prog = a
+        apply_channel(ch)
       elseif kind == 0xE0 then
         send(string.format("pitch_bend %d %d", ch, (b << 7) | a))
       end
@@ -677,9 +951,11 @@ local function midi_to_fluid(data)
   end
 end
 
-local function add_midi_device()
-  if midi.devices[MIDI_DEVICE_ID] then return end
-  local d = midi.new(MIDI_DEVICE_ID, "fluidsynth", nil)
+local function add_midi_device(n)
+  local def = DEVICES[n]
+  if midi.devices[def.id] then return end
+  local base = (n - 1) * DEVICE_CHANNELS
+  local d = midi.new(def.id, def.name, nil)
   function d:send(data)
     if data.type then
       data = midi.to_data(data)
@@ -687,11 +963,11 @@ local function add_midi_device()
     -- MIDI clock etc. shouldn't wake fluidsynth up
     if data[1] == nil or data[1] >= 0xF8 then return end
     if not fluid.out and not start() then return end
-    midi_to_fluid(data)
+    midi_to_fluid(data, base)
   end
   -- there's no C-side device behind this one
   function d:clock_receive() end
-  midi.devices[MIDI_DEVICE_ID] = d
+  midi.devices[def.id] = d
   midi.update_devices()
   if midi.add then midi.add(d) end
 end
@@ -704,10 +980,14 @@ if not uninstalled() then
 end
 
 mod.hook.register("system_post_startup", "nb_fluid midi device", function()
-  add_midi_device()
+  for n in ipairs(DEVICES) do
+    add_midi_device(n)
+  end
 end)
 
 mod.hook.register("script_pre_init", "nb_fluid pre init", function()
+  -- loading the script cancelled the clock of a soundfont load
+  watch_job()
   read_prefs()
   for i in pairs(in_use) do
     in_use[i] = nil
@@ -734,24 +1014,29 @@ mod.hook.register("system_pre_shutdown", "nb_fluid shutdown", function()
 end)
 
 ------------------------------------------------------------------------
--- mod menu: soundfont, voice count, gain, setup, uninstall
+-- mod menu: soundfonts, voice count, gain, setup, uninstall
 
 local m = {
   item = 1,
   soundfonts = {},
   sf_index = 1,
+  -- 0: the same as soundfont 1
+  sf2_index = 0,
   missing = {},
   -- "confirm" after the first K3 on uninstall, "done" once it finished
   uninstall = nil,
 }
-local ITEMS = { "soundfont", "voices", "gain", "setup", "uninstall" }
+local ITEMS = { "soundfont", "soundfont 2", "voices", "gain", "setup", "uninstall" }
 
 local function refresh_soundfonts()
   m.soundfonts = find_soundfonts()
-  m.sf_index = 1
+  m.sf_index, m.sf2_index = 1, 0
   for idx, path in ipairs(m.soundfonts) do
     if path == prefs.soundfont then
       m.sf_index = idx
+    end
+    if path == prefs.soundfont2 then
+      m.sf2_index = idx
     end
   end
 end
@@ -829,7 +1114,14 @@ function m.enc(n, d)
       local idx = util.clamp(m.sf_index + d, 1, #m.soundfonts)
       if idx ~= m.sf_index then
         m.sf_index = idx
-        set_soundfont(m.soundfonts[idx])
+        set_soundfont(1, m.soundfonts[idx])
+        sync_shared_params()
+      end
+    elseif item == "soundfont 2" and #m.soundfonts > 0 then
+      local idx = util.clamp(m.sf2_index + d, 0, #m.soundfonts)
+      if idx ~= m.sf2_index then
+        m.sf2_index = idx
+        set_soundfont(2, m.soundfonts[idx])
         sync_shared_params()
       end
     elseif item == "voices" then
@@ -866,6 +1158,7 @@ function m.redraw()
   end
   local values = {
     #m.soundfonts > 0 and basename(prefs.soundfont) or "none found",
+    prefs.soundfont2 and basename(prefs.soundfont2) or SAME,
     prefs.voices,
     string.format("%.2f", prefs.gain),
     #m.missing > 0 and (#m.missing .. " missing, K3")
@@ -882,13 +1175,16 @@ function m.redraw()
     screen.text(ITEMS[idx])
     screen.move(127, y)
     local value = tostring(values[idx])
-    if #value > 18 then
-      value = value:sub(1, 17) .. "~"
+    -- the longer the label, the less room for the value
+    local room = math.min(18, 27 - #ITEMS[idx])
+    if #value > room then
+      value = value:sub(1, room - 1) .. "~"
     end
     screen.text_right(value)
   end
   local hint = ({
     soundfont = "soundfont: also in PARAMS",
+    ["soundfont 2"] = "for the fluidsynth 2 device",
     voices = "voices apply on next script load",
     setup = m.jack_gone and #m.missing == 0 and "JACK's files are gone" or nil,
   })[ITEMS[m.item]]
