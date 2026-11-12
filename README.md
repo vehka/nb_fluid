@@ -210,7 +210,15 @@ process (`io.popen` in write mode).
 FluidSynth's JACK outputs are connected to crone's engine inputs (the same
 inputs SuperCollider uses). That means the **ENGINE** level, the norns
 reverb, and tape recording all apply, as for any engine. FluidSynth keeps
-running across script changes, and stops when norns goes to sleep.
+running across script changes and norns restarts, and stops when norns goes
+to sleep. It is part of `norns-jack.service`: stopping or restarting JACK
+stops or restarts FluidSynth with it.
+
+If restarting norns hangs at `setting up jack clients..` and `jack_lsp`
+never returns, jackd itself is stuck (seen with jackd 1.9.17 after a JACK
+client was killed, with or without nb_fluid). Restart JACK, which restarts
+FluidSynth too, then norns:
+`sudo systemctl stop norns-main norns-sclang && sudo systemctl restart norns-jack && sudo systemctl start norns-sclang norns-main`.
 
 FluidSynth's output goes to `/tmp/nb_fluid.log`. Look there if nothing
 plays, and at `systemctl status nb-fluid` if it doesn't start.

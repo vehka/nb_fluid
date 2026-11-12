@@ -54,12 +54,19 @@ end
 -- It wants JACK but doesn't require it, so it also starts on desktop norns
 -- (no norns-jack.service). If the mod is deleted without uninstalling,
 -- ConditionPathExists keeps the leftover unit from starting.
+--
+-- PartOf: stopping or restarting JACK stops or restarts fluidsynth too, so
+-- it closes its client before jackd goes away and doesn't sit on a dead
+-- connection afterwards. It survives norns-main restarts as before.
+-- TimeoutStopSec: if fluidsynth ever hangs on its way out (a stuck jackd),
+-- don't hold up a JACK restart for systemd's default 90 s.
 function M.render_unit()
   return table.concat({
     "[Unit]",
     "Description=FluidSynth for the nb_fluid norns mod",
     "Wants=norns-jack.service",
     "After=norns-jack.service",
+    "PartOf=norns-jack.service",
     "ConditionPathExists=" .. M.CODE_DIR .. "/lib/service.sh",
     "",
     "[Service]",
@@ -67,6 +74,7 @@ function M.render_unit()
     "User=" .. user(),
     "LimitRTPRIO=95",
     "LimitMEMLOCK=infinity",
+    "TimeoutStopSec=5",
     "EnvironmentFile=" .. M.ENV_FILE,
     "ExecStart=/bin/sh " .. M.CODE_DIR .. "/lib/service.sh",
     "",
